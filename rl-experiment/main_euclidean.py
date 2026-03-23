@@ -4,6 +4,8 @@ from src.MDPsolver import MDPsolver
 import argparse
 import pickle
 import copy
+import os
+import logging
 from scipy.optimize import LinearConstraint, minimize, Bounds, linprog
 
 def find_fixed_point(policy_matrix, env):
@@ -61,21 +63,47 @@ def compute_hypergrad(policy, y,gridworld,rho):
     #b = policy.reshape(gridworld.n_states*gridworld.n_actions, -1)
     #return (1 - gridworld.gamma)**(-1)*y #*a*b
     return -y/(1 - gridworld.gamma)
-parser = argparse.ArgumentParser(description='Primal Dual RL')
+parser = argparse.ArgumentParser(description='Primal Dual RL (Euclidean)')
 parser.add_argument('--n-states', type=int, default=10)
 parser.add_argument('--grid-type', type=int, default=0)
 parser.add_argument('--adaptive', action="store_true", default=False)
 parser.add_argument('--theory-steps', action="store_true", default=False)
+parser.add_argument('--max-iter', type=int, default=300)
+parser.add_argument('--output-dir', type=str, default=None)
 args = parser.parse_args()
+
+# ---- output / logging setup ----
+_here = os.path.dirname(os.path.abspath(__file__))
+_out  = args.output_dir or os.path.join(_here, "results", "euclidean")
+_log  = os.path.join(_here, "logs")
+os.makedirs(_out, exist_ok=True)
+os.makedirs(_log, exist_ok=True)
+
+_mode     = "adaptive" if args.adaptive else ("theory" if args.theory_steps else "fixed")
+_run_name = f"euclidean_{_mode}_S{args.n_states}_G{args.grid_type}"
+_ckpt     = os.path.join(_out, f"{_run_name}.pkl")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.FileHandler(os.path.join(_log, f"{_run_name}.log"), mode="w"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
+logger.info(f"Run: {_run_name}  |  output: {_ckpt}")
+
 gridworld = GridWorldEnvironment(args.grid_type, args.n_states, prop=0)
 gridworld.gamma = 0.5
 state_dim = gridworld.n_states
 n_actions = gridworld.n_actions
-A = np.zeros((state_dim,state_dim*n_actions))
+A = np.zeros((state_dim, state_dim*n_actions))
 for s in range(state_dim):
     A[s][s*n_actions:(s+1)*n_actions] = 1
 a_tot = state_dim*n_actions
-K = int(3e2) 
+K = args.max_iter
 policy_s = np.ones(gridworld.n_actions)/gridworld.n_actions
 policy = np.vstack(state_dim*[policy_s])
 Us=[policy, policy]
@@ -147,13 +175,19 @@ for k in range(K):
     #policy_avg = np.mean(policies, axis=0)
     v_out = solver.pi_eval(policy)
     values.append((solver.v - v_out).dot(gridworld.p_in))
-    if not k %5: #100:
-        print(k, values[-1])
-        with open(f"euclidean{args.adaptive}{args.n_states}{args.theory_steps}", "wb") as file:
-            pickle.dump({"values":values, "policies":policies}, file)
-    
+    if not k % 5:
+        logger.info(f"k={k:5d}  gap={values[-1]:.6e}  gamma={gammas[-1]:.4f}")
+        with open(_ckpt, "wb") as file:
+            pickle.dump({"values": values, "policies": policies,
+                         "args": vars(args)}, file)
+
     if np.isnan((solver.v - v_out).dot(gridworld.p_in)):
+        logger.warning("NaN detected — stopping early.")
         break
+
+with open(_ckpt, "wb") as file:
+    pickle.dump({"values": values, "policies": policies, "args": vars(args)}, file)
+logger.info(f"Done. Final gap={values[-1]:.6e}  Saved to {_ckpt}")
 
 
 
